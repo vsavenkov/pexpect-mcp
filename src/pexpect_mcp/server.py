@@ -70,6 +70,10 @@ def pexpect_tool(code: str, timeout: Optional[int] = None) -> str:
         child = pexpect.spawn('lldb ./mytool')
         child.expect("(lldb)")
 
+    Windows Note:
+        On Windows, use subprocess with these flags to avoid handle inheritance issues:
+        subprocess.run([...], stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+
     Returns:
         The result of the code execution or an error message.
 

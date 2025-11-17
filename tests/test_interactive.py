@@ -129,7 +129,25 @@ print('Interactive test passed')
         print("Test 4: Execute subprocess...")
 
         # Use sys.executable to ensure we get the correct Python
-        code = '''
+        if sys.platform == "win32":
+            code = '''
+import subprocess
+import sys
+# On Windows, redirect stdin to DEVNULL and use CREATE_NO_WINDOW
+result = subprocess.run(
+    [sys.executable, '-c', 'print(5 * 5)'],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    timeout=10,
+    creationflags=subprocess.CREATE_NO_WINDOW
+)
+print(f'Output: {result.stdout.strip()}')
+print(f'Return code: {result.returncode}')
+'''
+        else:
+            code = '''
 import subprocess
 import sys
 result = subprocess.run([sys.executable, '-c', 'print(5 * 5)'], capture_output=True, text=True, timeout=10)
