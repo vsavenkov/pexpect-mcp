@@ -92,10 +92,17 @@ def test_server():
         if sys.platform == "win32":
             # Windows: Use pywinpty wrapper for Python REPL
             code = '''
-child = pexpect.spawn('python -i')
+import sys
+import time
+child = pexpect.spawn(sys.executable + ' -i')
+print(f'Spawned: {sys.executable}')
 child.expect('>>>', timeout=10)
+print(f'Found prompt, buffer was: {repr(child.before)}')
+time.sleep(0.5)  # Give REPL time to be fully ready
 child.sendline('print(3 * 7)')
-child.expect('21', timeout=5)
+print(f'Sent command, waiting for 21...')
+child.expect('21', timeout=10)
+print(f'Found 21, buffer before was: {repr(child.before)}')
 child.sendline('exit()')
 child.expect(pexpect.EOF, timeout=5)
 print('Interactive test passed')

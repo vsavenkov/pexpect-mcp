@@ -40,6 +40,27 @@ if sys.platform == "win32":
             self.after = ""
             self.match = None
             self.timeout = 30  # default timeout
+            self._lock = threading.Lock()
+            self._reader_thread = None
+            self._stop_reader = False
+            self._start_reader_thread()
+
+        def _start_reader_thread(self):
+            """Start a background thread to continuously read from the process."""
+            def reader():
+                while not self._stop_reader and self.proc.isalive():
+                    try:
+                        # Read in small chunks
+                        data = self.proc.read(1)
+                        if data:
+                            with self._lock:
+                                self.buffer += data
+                    except:
+                        break
+                    time.sleep(0.001)  # Small sleep to prevent CPU spin
+
+            self._reader_thread = threading.Thread(target=reader, daemon=True)
+            self._reader_thread.start()
 
         def expect(self, pattern: Union[str, type, List], timeout: Optional[int] = None) -> int:
             """Wait for pattern to appear in output.
@@ -66,67 +87,45 @@ if sys.platform == "win32":
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed >= timeout:
-                    raise TimeoutError(f"Timeout waiting for pattern after {timeout}s")
+                    with self._lock:
+                        buf_snapshot = self.buffer[:500]
+                    raise TimeoutError(f"Timeout waiting for pattern after {timeout}s. Buffer: {repr(buf_snapshot)}")
 
                 # Check for EOF
                 if not self.proc.isalive():
-                    # Read any remaining output
-                    try:
-                        remaining = self.proc.read()
-                        if remaining:
-                            self.buffer += remaining
-                    except:
-                        pass
+                    # Give reader thread time to finish
+                    time.sleep(0.1)
 
                     # Check if any pattern is EOF
                     for i, p in enumerate(patterns):
                         if p is EOF or p == EOF:
-                            self.before = self.buffer
-                            self.after = ""
-                            self.buffer = ""
+                            with self._lock:
+                                self.before = self.buffer
+                                self.after = ""
+                                self.buffer = ""
                             return i
 
-                    raise EOFError("Process ended without matching pattern")
+                    with self._lock:
+                        buf_snapshot = self.buffer
+                    raise EOFError(f"Process ended without matching pattern. Buffer: {repr(buf_snapshot)}")
 
-                # Try to read more data (non-blocking)
-                try:
-                    # Check if data is available before reading
-                    if self.proc.isalive():
-                        # pywinpty read() blocks, so we use a thread with timeout
-                        result_container = [None]
+                # Check patterns against buffer (thread-safe)
+                with self._lock:
+                    for i, p in enumerate(patterns):
+                        if p is EOF or p == EOF:
+                            continue  # EOF checked above
+                        if p is TIMEOUT or p == TIMEOUT:
+                            continue  # TIMEOUT handled by timeout logic
 
-                        def read_chunk():
-                            try:
-                                result_container[0] = self.proc.read(1024)
-                            except:
-                                result_container[0] = ""
-
-                        read_thread = threading.Thread(target=read_chunk)
-                        read_thread.daemon = True
-                        read_thread.start()
-                        read_thread.join(timeout=0.1)
-
-                        if result_container[0]:
-                            self.buffer += result_container[0]
-                except:
-                    pass
-
-                # Check patterns against buffer
-                for i, p in enumerate(patterns):
-                    if p is EOF or p == EOF:
-                        continue  # EOF checked above
-                    if p is TIMEOUT or p == TIMEOUT:
-                        continue  # TIMEOUT handled by timeout logic
-
-                    # String pattern matching
-                    if isinstance(p, str):
-                        match = re.search(p, self.buffer)
-                        if match:
-                            self.before = self.buffer[:match.start()]
-                            self.after = match.group()
-                            self.match = match
-                            self.buffer = self.buffer[match.end():]
-                            return i
+                        # String pattern matching
+                        if isinstance(p, str):
+                            match = re.search(p, self.buffer)
+                            if match:
+                                self.before = self.buffer[:match.start()]
+                                self.after = match.group()
+                                self.match = match
+                                self.buffer = self.buffer[match.end():]
+                                return i
 
                 # Small sleep to avoid busy waiting
                 time.sleep(0.01)
@@ -152,6 +151,9 @@ if sys.platform == "win32":
 
         def close(self) -> None:
             """Close the process."""
+            self._stop_reader = True
+            if self._reader_thread:
+                self._reader_thread.join(timeout=1)
             try:
                 self.proc.close()
             except:
