@@ -2,6 +2,7 @@ import sys
 import re
 import time
 import traceback
+import threading
 from io import StringIO
 from typing import Any, Dict, Optional, Union, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -87,12 +88,26 @@ if sys.platform == "win32":
 
                     raise EOFError("Process ended without matching pattern")
 
-                # Try to read more data
+                # Try to read more data (non-blocking)
                 try:
-                    # Read with small timeout to avoid blocking
-                    data = self.proc.read(timeout=0.1)
-                    if data:
-                        self.buffer += data
+                    # Check if data is available before reading
+                    if self.proc.isalive():
+                        # pywinpty read() blocks, so we use a thread with timeout
+                        result_container = [None]
+
+                        def read_chunk():
+                            try:
+                                result_container[0] = self.proc.read(1024)
+                            except:
+                                result_container[0] = ""
+
+                        read_thread = threading.Thread(target=read_chunk)
+                        read_thread.daemon = True
+                        read_thread.start()
+                        read_thread.join(timeout=0.1)
+
+                        if result_container[0]:
+                            self.buffer += result_container[0]
                 except:
                     pass
 
