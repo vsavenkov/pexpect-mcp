@@ -1,10 +1,25 @@
-import signal
 import sys
 import traceback
 from io import StringIO
 from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-import pexpect
+# Platform-specific imports
+if sys.platform != "win32":
+    import signal
+    HAS_SIGALRM = True
+else:
+    HAS_SIGALRM = False
+
+# Import pexpect or wexpect based on platform
+if sys.platform == "win32":
+    try:
+        import wexpect as pexpect
+    except ImportError:
+        import pexpect
+else:
+    import pexpect
+
 from mcp.server.fastmcp import FastMCP
 
 
@@ -25,9 +40,10 @@ class TimeoutError(Exception):
     pass
 
 
-def timeout_handler(signum, frame):
-    """Signal handler for timeout."""
-    raise TimeoutError("Operation timed out after {} seconds".format(TIMEOUT))
+if HAS_SIGALRM:
+    def timeout_handler(signum, frame):
+        """Signal handler for timeout."""
+        raise TimeoutError("Operation timed out after {} seconds".format(TIMEOUT))
 
 
 def safe_str(obj: Any) -> str:
@@ -95,43 +111,72 @@ def pexpect_tool(code: str, timeout: Optional[int] = None) -> str:
         # Set default timeout for pexpect operations
         pexpect_session.timeout = pexpect_timeout
 
-    # Set up signal alarm for timeout
-    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(actual_timeout)
+    if HAS_SIGALRM:
+        # Unix: Use signal-based timeout
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(actual_timeout)
 
-    try:
-        # Try to execute as an expression first
-        result = eval(code, {"__builtins__": __builtins__}, local_vars)
-        _update_globals(local_vars, pexpect_timeout)
-
-        # Format the response
-        return _format_response(result, captured_output.getvalue())
-
-    except SyntaxError:
-        # If it's not an expression, try executing as a statement
         try:
-            exec(code, {"__builtins__": __builtins__}, local_vars)
+            # Try to execute as an expression first
+            result = eval(code, {"__builtins__": __builtins__}, local_vars)
             _update_globals(local_vars, pexpect_timeout)
-            return _format_response(
-                "Code executed successfully", captured_output.getvalue()
-            )
 
-        except Exception as exec_error:
-            return _format_response(f"Error: {exec_error}", captured_output.getvalue())
+            # Format the response
+            return _format_response(result, captured_output.getvalue())
 
-    except TimeoutError as timeout_error:
-        # Format timeout error with traceback
-        tb = traceback.format_exc()
-        error_msg = f"Timeout Error: {timeout_error}\n\nTraceback:\n{tb}"
-        return _format_response(error_msg, captured_output.getvalue())
+        except SyntaxError:
+            # If it's not an expression, try executing as a statement
+            try:
+                exec(code, {"__builtins__": __builtins__}, local_vars)
+                _update_globals(local_vars, pexpect_timeout)
+                return _format_response(
+                    "Code executed successfully", captured_output.getvalue()
+                )
 
-    except Exception as eval_error:
-        return _format_response(f"Error: {eval_error}", captured_output.getvalue())
+            except Exception as exec_error:
+                return _format_response(f"Error: {exec_error}", captured_output.getvalue())
 
-    finally:
-        # Always clean up the alarm and restore old handler
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        except TimeoutError as timeout_error:
+            # Format timeout error with traceback
+            tb = traceback.format_exc()
+            error_msg = f"Timeout Error: {timeout_error}\n\nTraceback:\n{tb}"
+            return _format_response(error_msg, captured_output.getvalue())
+
+        except Exception as eval_error:
+            return _format_response(f"Error: {eval_error}", captured_output.getvalue())
+
+        finally:
+            # Always clean up the alarm and restore old handler
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Windows: Use threading-based timeout
+        def execute_code():
+            try:
+                # Try to execute as an expression first
+                result = eval(code, {"__builtins__": __builtins__}, local_vars)
+                _update_globals(local_vars, pexpect_timeout)
+                return _format_response(result, captured_output.getvalue())
+            except SyntaxError:
+                # If it's not an expression, try executing as a statement
+                exec(code, {"__builtins__": __builtins__}, local_vars)
+                _update_globals(local_vars, pexpect_timeout)
+                return _format_response(
+                    "Code executed successfully", captured_output.getvalue()
+                )
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(execute_code)
+                result = future.result(timeout=actual_timeout)
+                return result
+
+        except FuturesTimeoutError:
+            error_msg = f"Timeout Error: Operation timed out after {actual_timeout} seconds"
+            return _format_response(error_msg, captured_output.getvalue())
+
+        except Exception as error:
+            return _format_response(f"Error: {error}", captured_output.getvalue())
 
 
 def _format_response(result, log_output):
