@@ -90,10 +90,16 @@ def test_server():
         print("Test 3: Spawn interactive process...")
 
         if sys.platform == "win32":
-            # Windows: wexpect has limited support for console apps
-            # Use a simple command spawn instead of interactive REPL
-            print("  SKIP: Interactive spawn not reliable on Windows (wexpect limitation)")
-            print("  Using subprocess test as alternative (Test 4)")
+            # Windows: Use pywinpty wrapper for Python REPL
+            code = '''
+child = pexpect.spawn('python -i')
+child.expect('>>>', timeout=10)
+child.sendline('print(3 * 7)')
+child.expect('21', timeout=5)
+child.sendline('exit()')
+child.expect(pexpect.EOF, timeout=5)
+print('Interactive test passed')
+'''
         else:
             # Unix: Use Python REPL
             code = '''
@@ -106,24 +112,24 @@ child.expect(pexpect.EOF, timeout=5)
 print('Interactive test passed')
 '''
 
-            send_jsonrpc(proc, {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "name": "pexpect_tool",
-                    "arguments": {
-                        "code": code,
-                        "timeout": 30
-                    }
+        send_jsonrpc(proc, {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "pexpect_tool",
+                "arguments": {
+                    "code": code,
+                    "timeout": 30
                 }
-            })
-            response = read_response(proc)
-            assert response is not None, "Failed to get response"
-            assert "result" in response, f"Tool call failed: {response}"
-            content = response["result"]["content"][0]["text"]
-            assert "Interactive test passed" in content, f"Interactive test failed: {content}"
-            print("  PASS: Interactive process spawning works")
+            }
+        })
+        response = read_response(proc)
+        assert response is not None, "Failed to get response"
+        assert "result" in response, f"Tool call failed: {response}"
+        content = response["result"]["content"][0]["text"]
+        assert "Interactive test passed" in content, f"Interactive test failed: {content}"
+        print("  PASS: Interactive process spawning works")
 
         # Test 4: Test subprocess execution (useful for Windows)
         print("Test 4: Execute subprocess...")

@@ -1,7 +1,9 @@
 import sys
+import re
+import time
 import traceback
 from io import StringIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # Platform-specific imports
@@ -11,12 +13,147 @@ if sys.platform != "win32":
 else:
     HAS_SIGALRM = False
 
-# Import pexpect or wexpect based on platform
+# Import pexpect or create pywinpty wrapper based on platform
 if sys.platform == "win32":
-    try:
-        import wexpect as pexpect
-    except ImportError:
-        import pexpect
+    from winpty import PtyProcess
+
+    class EOF:
+        """Sentinel for end-of-file."""
+        pass
+
+    class TIMEOUT:
+        """Sentinel for timeout."""
+        pass
+
+    class WinPtySpawn:
+        """Pexpect-like wrapper around pywinpty for Windows."""
+
+        EOF = EOF
+        TIMEOUT = TIMEOUT
+
+        def __init__(self, command: str):
+            """Spawn a process using pywinpty."""
+            self.proc = PtyProcess.spawn(command)
+            self.buffer = ""
+            self.before = ""
+            self.after = ""
+            self.match = None
+            self.timeout = 30  # default timeout
+
+        def expect(self, pattern: Union[str, type, List], timeout: Optional[int] = None) -> int:
+            """Wait for pattern to appear in output.
+
+            Args:
+                pattern: String pattern, EOF, TIMEOUT, or list of patterns
+                timeout: Timeout in seconds (uses self.timeout if None)
+
+            Returns:
+                Index of matched pattern (0 if single pattern)
+            """
+            if timeout is None:
+                timeout = self.timeout
+
+            # Handle list of patterns
+            if isinstance(pattern, list):
+                patterns = pattern
+            else:
+                patterns = [pattern]
+
+            start_time = time.time()
+
+            while True:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(f"Timeout waiting for pattern after {timeout}s")
+
+                # Check for EOF
+                if not self.proc.isalive():
+                    # Read any remaining output
+                    try:
+                        remaining = self.proc.read()
+                        if remaining:
+                            self.buffer += remaining
+                    except:
+                        pass
+
+                    # Check if any pattern is EOF
+                    for i, p in enumerate(patterns):
+                        if p is EOF or p == EOF:
+                            self.before = self.buffer
+                            self.after = ""
+                            self.buffer = ""
+                            return i
+
+                    raise EOFError("Process ended without matching pattern")
+
+                # Try to read more data
+                try:
+                    # Read with small timeout to avoid blocking
+                    data = self.proc.read(timeout=0.1)
+                    if data:
+                        self.buffer += data
+                except:
+                    pass
+
+                # Check patterns against buffer
+                for i, p in enumerate(patterns):
+                    if p is EOF or p == EOF:
+                        continue  # EOF checked above
+                    if p is TIMEOUT or p == TIMEOUT:
+                        continue  # TIMEOUT handled by timeout logic
+
+                    # String pattern matching
+                    if isinstance(p, str):
+                        match = re.search(p, self.buffer)
+                        if match:
+                            self.before = self.buffer[:match.start()]
+                            self.after = match.group()
+                            self.match = match
+                            self.buffer = self.buffer[match.end():]
+                            return i
+
+                # Small sleep to avoid busy waiting
+                time.sleep(0.01)
+
+        def sendline(self, text: str = "") -> None:
+            """Send text followed by newline."""
+            self.proc.write(text + "\r\n")
+
+        def send(self, text: str) -> None:
+            """Send text without newline."""
+            self.proc.write(text)
+
+        def read(self, size: int = -1) -> str:
+            """Read from process output."""
+            if size == -1:
+                return self.proc.read()
+            else:
+                return self.proc.read(size)
+
+        def isalive(self) -> bool:
+            """Check if process is still running."""
+            return self.proc.isalive()
+
+        def close(self) -> None:
+            """Close the process."""
+            try:
+                self.proc.close()
+            except:
+                pass
+
+        def __del__(self):
+            """Cleanup on deletion."""
+            self.close()
+
+    # Create pexpect-like module interface
+    class PexpectModule:
+        """Module-like object providing pexpect interface using pywinpty."""
+        EOF = EOF
+        TIMEOUT = TIMEOUT
+        spawn = WinPtySpawn
+
+    pexpect = PexpectModule()
 else:
     import pexpect
 
@@ -70,9 +207,9 @@ def pexpect_tool(code: str, timeout: Optional[int] = None) -> str:
         child = pexpect.spawn('lldb ./mytool')
         child.expect("(lldb)")
 
-    Windows Note:
-        On Windows, use subprocess with these flags to avoid handle inheritance issues:
-        subprocess.run([...], stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    Platform Support:
+        - Unix: Uses native pexpect with PTY support
+        - Windows: Uses pywinpty wrapper with ConPTY (Windows 10 1809+)
 
     Returns:
         The result of the code execution or an error message.
